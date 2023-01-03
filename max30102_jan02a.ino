@@ -19,6 +19,15 @@
 #include "heartRate.h"
 #include "thingProperties.h"
 
+#define TIMETOBOOT 3000  // wait for this time(msec) to output SpO2
+#define SCALE 88.0       //adjust to display heart beat and SpO2 in the same scale
+#define MAX_SPO2 100.0
+#define MIN_SPO2 80.0
+#define SAMPLING 5       //if you want to see heart beat more precisely , set SAMPLING to 1
+#define FINGER_ON 30000  // if red signal is lower than this , it indicates your finger is not on the sensor
+#define MINIMUM_SPO2 80.0
+#define FINGER_THRESTHOLD 50000
+
 MAX30105 particleSensor;
 
 //#define MAX30105 //if you have Sparkfun's MAX30105 breakout board , try #define MAX30105
@@ -98,7 +107,7 @@ int ratesSize = 0;
 void heartBeat(long irValue) {
   if (checkForBeat(irValue) == true)
   {
-    if (irValue >= 50000 != hasFinger) {
+    if (irValue >= FINGER_THRESTHOLD != hasFinger) {
       beatsPerMinute = 0;
       beatAvg = 0;
       rateSpot = 0;
@@ -106,8 +115,8 @@ void heartBeat(long irValue) {
       ratesSize = 0;
       memset(rates, 0, sizeof(rates));
     }
-    hasFinger = irValue >= 50000;
-    if (!hasFinger) {
+    if (irValue < FINGER_THRESTHOLD) {
+      bmp = 0;
       return;
     }
     //We sensed a beat!
@@ -128,6 +137,11 @@ void heartBeat(long irValue) {
       for (byte x = 0 ; x < RATE_SIZE ; x++)
         beatAvg += rates[x];
       beatAvg /= ratesSize;
+      bmp = beatAvg;
+
+    Serial.print(beatsPerMinute);  //low pass filtered SpO2
+    Serial.print(",");
+    Serial.println(beatAvg);
     }
   }
 }
@@ -139,16 +153,49 @@ double sumredrms = 0;
 int i = 0;
 int Num = 100;  //calculate SpO2 by this sampling interval
 
-double ESpO2 = 95.0;     //initial value of estimated SpO2
+double ESpO2 = 0.0;     //initial value of estimated SpO2
 double FSpO2 = 0.7;      //filter factor for estimated SpO2
 double frate = 0.95;     //low pass filter for IR/red LED value to eliminate AC component
-#define TIMETOBOOT 3000  // wait for this time(msec) to output SpO2
-#define SCALE 88.0       //adjust to display heart beat and SpO2 in the same scale
-#define MAX_SPO2 100.0
-#define MIN_SPO2 80.0
-#define SAMPLING 5       //if you want to see heart beat more precisely , set SAMPLING to 1
-#define FINGER_ON 30000  // if red signal is lower than this , it indicates your finger is not on the sensor
-#define MINIMUM_SPO2 80.0
+void spo2(uint32_t &ir, uint32_t &red, double &fred, double &fir, double &SpO2) {
+  if (ir >= FINGER_THRESTHOLD != hasFinger) {
+    if (hasFinger) {
+      ESpO2 = 0;
+      particleSensor.nextSample();  //We're finished with this sample so move to next sample
+    }
+    else {
+      ESpO2 = 95.0;
+    }
+  }
+  if (ir < FINGER_THRESTHOLD) {
+    po2 = 0;
+    return;
+  }
+
+  i++;
+  fred = (double)red;
+  fir = (double)ir;
+  avered = avered * frate + (double)red * (1.0 - frate);  //average red level by low pass filter
+  aveir = aveir * frate + (double)ir * (1.0 - frate);     //average IR level by low pass filter
+  sumredrms += (fred - avered) * (fred - avered);         //square sum of alternate component of red level
+  sumirrms += (fir - aveir) * (fir - aveir);              //square sum of alternate component of IR level
+  if ((i % Num) == 0) {
+    double R = (sqrt(sumredrms) / avered) / (sqrt(sumirrms) / aveir);
+    // Serial.println(R);
+    SpO2 = -23.3 * (R - 0.4) + 100;                //http://ww1.microchip.com/downloads/jp/AppNotes/00001525B_JP.pdf
+    ESpO2 = FSpO2 * ESpO2 + (1.0 - FSpO2) * SpO2;  //low pass filter
+    sumredrms = 0.0;
+    sumirrms = 0.0;
+    i = 0;
+
+    po2 = ESpO2;
+
+    Serial.print(ESpO2);  //low pass filtered SpO2
+    Serial.print(",");
+    Serial.print(beatsPerMinute);  //low pass filtered SpO2
+    Serial.print(",");
+    Serial.println(beatAvg);
+  }
+}
 
 void readHeartBeatAndSPO2(void *pvParameters) {
 
@@ -168,32 +215,8 @@ void readHeartBeatAndSPO2(void *pvParameters) {
       ir = particleSensor.getFIFORed();  //why getFIFORed output IR data by MAX30102 on MH-ET LIVE breakout board
 #endif
       heartBeat(ir);
-      i++;
-      fred = (double)red;
-      fir = (double)ir;
-      avered = avered * frate + (double)red * (1.0 - frate);  //average red level by low pass filter
-      aveir = aveir * frate + (double)ir * (1.0 - frate);     //average IR level by low pass filter
-      sumredrms += (fred - avered) * (fred - avered);         //square sum of alternate component of red level
-      sumirrms += (fir - aveir) * (fir - aveir);              //square sum of alternate component of IR level
-      if ((i % Num) == 0) {
-        double R = (sqrt(sumredrms) / avered) / (sqrt(sumirrms) / aveir);
-        // Serial.println(R);
-        SpO2 = -23.3 * (R - 0.4) + 100;                //http://ww1.microchip.com/downloads/jp/AppNotes/00001525B_JP.pdf
-        ESpO2 = FSpO2 * ESpO2 + (1.0 - FSpO2) * SpO2;  //low pass filter
-        sumredrms = 0.0;
-        sumirrms = 0.0;
-        i = 0;
-
-        bmp = beatsPerMinute;
-        po2 = ESpO2;
-
-        Serial.print(ESpO2);  //low pass filtered SpO2
-        Serial.print(",");
-        Serial.print(beatsPerMinute);  //low pass filtered SpO2
-        Serial.print(",");
-        Serial.println(beatAvg);
-        break;
-      }
+      spo2(ir, red, fred, fir, SpO2);
+      hasFinger = ir >= FINGER_THRESTHOLD;
       particleSensor.nextSample();  //We're finished with this sample so move to next sample
       //Serial.println(SpO2);
     }
